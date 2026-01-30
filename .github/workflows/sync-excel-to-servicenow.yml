@@ -1,0 +1,65 @@
+name: Sync Excel to Master Folder and ServiceNow
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'SeniorConnect_MasterLog.xlsx'
+  schedule:
+    # Run every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install pandas openpyxl requests python-dateutil
+          
+      - name: Copy to Master Excel Folder
+        run: |
+          # Create master folder if it doesn't exist
+          mkdir -p master-excel-archive
+          
+          # Copy with timestamp
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          cp SeniorConnect_MasterLog.xlsx "master-excel-archive/SeniorConnect_MasterLog_${TIMESTAMP}.xlsx"
+          
+          # Keep latest version as well
+          cp SeniorConnect_MasterLog.xlsx "master-excel-archive/SeniorConnect_MasterLog_Latest.xlsx"
+          
+      - name: Process and Push to ServiceNow
+        env:
+          SERVICENOW_INSTANCE: ${{ secrets.SERVICENOW_INSTANCE }}
+          SERVICENOW_USERNAME: ${{ secrets.SERVICENOW_USERNAME }}
+          SERVICENOW_PASSWORD: ${{ secrets.SERVICENOW_PASSWORD }}
+          SERVICENOW_TABLE: ${{ secrets.SERVICENOW_TABLE }}
+        run: |
+          python scripts/sync_to_servicenow.py
+          
+      - name: Commit archived files
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add master-excel-archive/
+          git diff --quiet && git diff --staged --quiet || git commit -m "Archive Excel snapshot - $(date +"%Y-%m-%d %H:%M:%S")"
+          
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: main
