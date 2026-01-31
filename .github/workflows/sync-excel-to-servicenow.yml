@@ -1,5 +1,9 @@
 name: Sync Excel to Master Folder and ServiceNow
 
+# Add permissions for the workflow
+permissions:
+  contents: write
+
 on:
   push:
     branches:
@@ -10,7 +14,7 @@ on:
     # Run every 5 minutes
     - cron: '*/5 * * * *'
   workflow_dispatch: # Allow manual trigger
-
+  
 jobs:
   sync-data:
     runs-on: ubuntu-latest
@@ -63,3 +67,9 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           branch: main
+
+
+
+
+
+
