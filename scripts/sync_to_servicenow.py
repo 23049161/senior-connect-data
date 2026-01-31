@@ -1,195 +1,405 @@
 #!/usr/bin/env python3
 """
-Script to process Excel data and push specific fields to ServiceNow
+Script to process Excel data and push to ServiceNow
+Requirements:
+- ALERTS sheet: Push ALL data, but only NEW records (no duplicates on re-runs)
+- Other sheets: Only push FIRST ROW where Hour = 12 and FIRST ROW where Hour = 20
+
+Excel columns (actual structure):
+- Date (Column A)
+- Timestamp (Column B) 
+- Hour (Column C) - Contains hour value like 12, 18, 20
+- Location (Column D)
+- Value (Column E)
+- Status (Column F)
+
+ServiceNow tables:
+- x_1855398_elderl_0_iot_alert_event - For ALERTS sheet
+- x_1855398_elderl_0_iot_sensor_record - For sensor sheets
 """
 import os
 import sys
-import json
 import pandas as pd
 import requests
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 class ServiceNowSync:
     def __init__(self):
-        self.instance = os.environ.get('dev313533')
-        self.username = os.environ.get('admin')
-        self.password = os.environ.get('eG0rRKK0%-jx')
-        self.table = os.environ.get('SERVICENOW_TABLE', 'iot_sensor_log')
+        self.instance = os.environ.get('SERVICENOW_INSTANCE')
+        self.username = os.environ.get('SERVICENOW_USERNAME')
+        self.password = os.environ.get('SERVICENOW_PASSWORD')
         
         if not all([self.instance, self.username, self.password]):
             raise ValueError("Missing required ServiceNow credentials in environment variables")
         
-        self.base_url = f"https://{self.instance}.service-now.com/api/now/table/{self.table}"
+        # Correct table names with app scope prefix
+        self.alert_table = "x_1855398_elderl_0_iot_alert_event"
+        self.sensor_table = "x_1855398_elderl_0_iot_sensor_record"
+        
         self.headers = {
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
         
-    def read_excel_data(self, file_path: str) -> pd.DataFrame:
-        """Read data from Excel file"""
-        print(f"Reading Excel file: {file_path}")
-        df = pd.read_excel(file_path, engine='openpyxl')
-        print(f"Loaded {len(df)} rows from Excel")
-        return df
+    def read_all_sheets(self, file_path: str) -> Dict[str, pd.DataFrame]:
+        """Read all sheets from Excel file"""
+        print(f"Reading all sheets from Excel file: {file_path}")
+        
+        # Read all sheets into a dictionary
+        all_sheets = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
+        
+        print(f"Found {len(all_sheets)} sheets:")
+        for sheet_name in all_sheets.keys():
+            print(f"  - {sheet_name}: {len(all_sheets[sheet_name])} rows")
+        
+        return all_sheets
     
-    def transform_data(self, df: pd.DataFrame) -> List[Dict]:
+    def filter_sensor_data_by_hour(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Transform Excel data to ServiceNow format
-        Customize this method based on your specific columns and requirements
+        For SENSOR sheets only:
+        Filter to get FIRST ROW with time at 12pm (noon)
+        and FIRST ROW with time at 8pm (20:00)
+        """
+        if df.empty:
+            return df
+        
+        print(f"Available columns: {list(df.columns)}")
+        
+        # Check for required column
+        if 'Timestamp' not in df.columns:
+            print(f"⚠ Warning: 'Timestamp' column not found. Using all data.")
+            return df
+        
+        # Convert Timestamp to datetime and extract hour
+        df['_timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+        df = df.dropna(subset=['_timestamp'])
+        
+        if df.empty:
+            print("⚠ No valid timestamp values found")
+            return df
+        
+        # Extract hour from timestamp
+        df['_hour'] = df['_timestamp'].dt.hour
+        
+        # Find FIRST row with time at 12pm (hour = 12)
+        rows_12pm = df[df['_hour'] == 12]
+        
+        # Find FIRST row with time at 8pm (hour = 20)
+        rows_8pm = df[df['_hour'] == 20]
+        
+        filtered_records = []
+        
+        if not rows_12pm.empty:
+            first_12pm = rows_12pm.iloc[0]
+            filtered_records.append(first_12pm)
+            print(f"  ✓ Selected FIRST 12pm row: Excel row {rows_12pm.index[0] + 2}, Time: {first_12pm['Timestamp']}")
+        else:
+            print(f"  ⚠ No rows found with time at 12pm")
+        
+        if not rows_8pm.empty:
+            first_8pm = rows_8pm.iloc[0]
+            filtered_records.append(first_8pm)
+            print(f"  ✓ Selected FIRST 8pm row: Excel row {rows_8pm.index[0] + 2}, Time: {first_8pm['Timestamp']}")
+        else:
+            print(f"  ⚠ No rows found with time at 8pm")
+        
+        # Create dataframe from filtered records
+        if filtered_records:
+            result_df = pd.DataFrame(filtered_records)
+            result_df = result_df.drop(['_timestamp', '_hour'], axis=1, errors='ignore')
+            print(f"✓ Filtered to {len(result_df)} row(s)")
+            return result_df
+        else:
+            print("⚠ No records found with time at 12pm or 8pm")
+            return pd.DataFrame()
+    
+    def transform_alert_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
+        """
+        Transform ALERTS sheet data for iot_alert_event table
+        Pushes ALL data from the sheet
+        
+        ServiceNow fields based on screenshot:
+        - sensor_type_id
+        - alert_date
+        - alert_time
+        - location
+        - severity
+        - message
         """
         records = []
         
         for idx, row in df.iterrows():
-            # Example transformation - adjust based on your actual columns
+            # Combine Date and Timestamp for the date/time fields
+            alert_date = str(row.get('Date', ''))
+            timestamp = str(row.get('Timestamp', ''))
+            
+            # Map the data
             record = {
-                # Map your Excel columns to ServiceNow fields
-                # Example mappings (customize these):
-                'id': str(row.get('alert_id', '')),
-                'email': str(row.get('Email', '')),
-                'phone': str(row.get('Phone', '')),
-                'status': str(row.get('Status', '')),
-                'last_contact': str(row.get('Last_Contact', '')),
-                'notes': str(row.get('Notes', '')),
-                'updated_at': datetime.now().isoformat(),
-                # Add more field mappings as needed
+                'sensor_type_id': 'SENSOR 1',
+                'alert_date': alert_date,
+                'alert_time': timestamp,
+                'location': str(row.get('Location', '')),
+                'severity': str(row.get('Value', '')),
+                'message': str(row.get('Status', '')),
             }
             
             # Filter out empty values
-            record = {k: v for k, v in record.items() if v and v != 'nan'}
+            record = {k: v for k, v in record.items() if v and v != 'nan' and v != 'NaT'}
             
-            if record:  # Only add if there's actual data
+            if record and len(record) > 2:
                 records.append(record)
         
-        print(f"Transformed {len(records)} records for ServiceNow")
+        print(f"Transformed {len(records)} alert records from sheet '{sheet_name}'")
         return records
     
-    def get_existing_records(self) -> Dict[str, str]:
+    def transform_sensor_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
+        """
+        Transform sensor sheet data for iot_sensor_record table
+        
+        ServiceNow fields based on screenshot:
+        - sensor_type_id
+        - record_date
+        - record_time
+        - location
+        - numeric_value or text_value
+        - status
+        - is_active
+        """
+        records = []
+        
+        for idx, row in df.iterrows():
+            # Extract data
+            record_date = str(row.get('Date', ''))
+            timestamp = str(row.get('Timestamp', ''))
+            
+            # Get value and determine if it's numeric or text
+            value = row.get('Value', '')
+            numeric_value = ''
+            text_value = ''
+            
+            try:
+                numeric_value = str(float(value))
+            except (ValueError, TypeError):
+                text_value = str(value)
+            
+            # Map the data
+            record = {
+                'sensor_type_id': 'SENSOR 1',
+                'record_date': record_date,
+                'record_time': timestamp,
+                'location': str(row.get('Location', '')),
+                'status': str(row.get('Status', '')),
+                'is_active': 'false',
+            }
+            
+            # Add numeric or text value
+            if numeric_value and numeric_value != 'nan':
+                record['numeric_value'] = numeric_value
+            if text_value and text_value != 'nan':
+                record['text_value'] = text_value
+            
+            # Filter out empty values
+            record = {k: v for k, v in record.items() if v and v != 'nan' and v != 'NaT'}
+            
+            if record and len(record) > 2:
+                records.append(record)
+        
+        print(f"Transformed {len(records)} sensor records from sheet '{sheet_name}'")
+        return records
+    
+    def get_existing_records(self, table: str) -> Dict[str, str]:
         """Fetch existing records from ServiceNow to check for duplicates"""
-        print("Fetching existing records from ServiceNow...")
+        print(f"Fetching existing records from {table}...")
+        
+        base_url = f"https://{self.instance}.service-now.com/api/now/table/{table}"
         
         try:
             response = requests.get(
-                self.base_url,
+                base_url,
                 auth=(self.username, self.password),
                 headers=self.headers,
-                params={'sysparm_limit': 10000}  # Adjust as needed
+                params={'sysparm_limit': 10000},
+                timeout=30
             )
             response.raise_for_status()
             
             existing = {}
             for record in response.json().get('result', []):
-                # Use a unique identifier - adjust based on your data
-                key = record.get('email') or record.get('name')
+                # Create unique key from date + time + location
+                if table == self.alert_table:
+                    date = record.get('alert_date', '')
+                    time_val = record.get('alert_time', '')
+                    location = record.get('location', '')
+                    severity = record.get('severity', '')
+                    key = f"{date}_{time_val}_{location}_{severity}"
+                else:
+                    date = record.get('record_date', '')
+                    time_val = record.get('record_time', '')
+                    location = record.get('location', '')
+                    key = f"{date}_{time_val}_{location}"
+                
                 if key:
                     existing[key] = record['sys_id']
             
-            print(f"Found {len(existing)} existing records")
+            print(f"Found {len(existing)} existing records in {table}")
             return existing
             
-        except Exception as e:
-            print(f"Error fetching existing records: {e}")
+        except requests.exceptions.RequestException as e:
+            print(f"⚠ Error fetching existing records from {table}: {e}")
+            print(f"⚠ Continuing without duplicate check - all records will be created")
             return {}
     
-    def create_record(self, data: Dict) -> bool:
+    def create_record(self, table: str, data: Dict) -> bool:
         """Create a new record in ServiceNow"""
+        base_url = f"https://{self.instance}.service-now.com/api/now/table/{table}"
+        
         try:
             response = requests.post(
-                self.base_url,
+                base_url,
                 auth=(self.username, self.password),
                 headers=self.headers,
-                json=data
+                json=data,
+                timeout=30
             )
             response.raise_for_status()
-            print(f"✓ Created record: {data.get('name', 'Unknown')}")
+            
+            location = data.get('location', 'Unknown')
+            if table == self.alert_table:
+                identifier = f"{data.get('alert_date')} {data.get('alert_time')} - {location}"
+            else:
+                identifier = f"{data.get('record_date')} {data.get('record_time')} - {location}"
+            
+            print(f"✓ Created record in {table}: {identifier}")
             return True
-        except Exception as e:
-            print(f"✗ Error creating record {data.get('name', 'Unknown')}: {e}")
+            
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Error creating record in {table}: {e}")
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                print(f"  Response: {e.response.text[:500]}")  # First 500 chars
             return False
     
-    def update_record(self, sys_id: str, data: Dict) -> bool:
-        """Update an existing record in ServiceNow"""
-        try:
-            response = requests.patch(
-                f"{self.base_url}/{sys_id}",
-                auth=(self.username, self.password),
-                headers=self.headers,
-                json=data
-            )
-            response.raise_for_status()
-            print(f"✓ Updated record: {data.get('name', 'Unknown')}")
-            return True
-        except Exception as e:
-            print(f"✗ Error updating record {data.get('name', 'Unknown')}: {e}")
-            return False
-    
-    def sync_records(self, records: List[Dict]) -> tuple:
-        """Sync records to ServiceNow (create or update)"""
-        existing = self.get_existing_records()
+    def sync_records(self, table: str, records: List[Dict]) -> tuple:
+        """Sync records to ServiceNow (create new records only, skip duplicates)"""
+        if not records:
+            print(f"No records to sync to {table}")
+            return 0, 0, 0
+        
+        existing = self.get_existing_records(table)
         
         created = 0
-        updated = 0
+        skipped = 0
         failed = 0
         
         for record in records:
-            # Use email or name as unique identifier - adjust as needed
-            identifier = record.get('email') or record.get('name')
+            # Create unique identifier
+            if table == self.alert_table:
+                date = record.get('alert_date', '')
+                time_val = record.get('alert_time', '')
+                location = record.get('location', '')
+                severity = record.get('severity', '')
+                identifier = f"{date}_{time_val}_{location}_{severity}"
+            else:
+                date = record.get('record_date', '')
+                time_val = record.get('record_time', '')
+                location = record.get('location', '')
+                identifier = f"{date}_{time_val}_{location}"
             
-            if not identifier:
-                print(f"⚠ Skipping record without identifier")
+            if not date or not time_val:
+                print(f"⚠ Skipping record without date or time: {record}")
                 failed += 1
                 continue
             
             if identifier in existing:
-                # Update existing record
-                if self.update_record(existing[identifier], record):
-                    updated += 1
-                else:
-                    failed += 1
+                # Skip - already exists
+                skipped += 1
             else:
                 # Create new record
-                if self.create_record(record):
+                if self.create_record(table, record):
                     created += 1
                 else:
                     failed += 1
         
-        return created, updated, failed
+        if skipped > 0:
+            print(f"⏭ Skipped {skipped} existing record(s)")
+        
+        return created, skipped, failed
 
 def main():
-    print("=" * 60)
+    print("=" * 80)
     print("Starting ServiceNow Sync Process")
-    print("=" * 60)
+    print("Configuration:")
+    print("  - ALERTS sheet: Push ALL data (only NEW records)")
+    print("  - Other sheets: Push FIRST row with time at 12pm and FIRST row with time at 8pm")
+    print("=" * 80)
     
     try:
         # Initialize sync client
         sync = ServiceNowSync()
         
-        # Read Excel data
+        # Read all sheets from Excel
         excel_file = "SeniorConnect_MasterLog.xlsx"
-        df = sync.read_excel_data(excel_file)
+        all_sheets = sync.read_all_sheets(excel_file)
         
-        # Transform data
-        records = sync.transform_data(df)
-        
-        if not records:
-            print("⚠ No records to sync")
+        if not all_sheets:
+            print("⚠ No sheets found in Excel file")
             return
         
-        # Sync to ServiceNow
-        created, updated, failed = sync.sync_records(records)
+        total_created = 0
+        total_skipped = 0
+        total_failed = 0
         
-        # Print summary
-        print("\n" + "=" * 60)
-        print("Sync Summary:")
-        print(f"  ✓ Created: {created}")
-        print(f"  ✓ Updated: {updated}")
-        print(f"  ✗ Failed:  {failed}")
-        print(f"  📊 Total:   {len(records)}")
-        print("=" * 60)
+        # Process each sheet
+        for sheet_name, df in all_sheets.items():
+            print(f"\n{'=' * 80}")
+            print(f"Processing sheet: {sheet_name}")
+            print(f"{'=' * 80}")
+            
+            if df.empty:
+                print(f"⚠ Sheet '{sheet_name}' is empty, skipping")
+                continue
+            
+            # Check if this is the ALERTS sheet
+            is_alert_sheet = sheet_name.upper() == 'ALERTS'
+            
+            if is_alert_sheet:
+                # ALERTS: Push ALL data
+                print(f"📢 ALERTS sheet → Pushing ALL data to {sync.alert_table}")
+                print(f"Total rows in sheet: {len(df)}")
+                records = sync.transform_alert_data(df, sheet_name)
+                created, skipped, failed = sync.sync_records(sync.alert_table, records)
+            else:
+                # OTHER SHEETS: Filter to time at 12pm and 8pm FIRST ROWS only
+                print(f"📊 Sensor sheet → Filtering for time at 12pm and 8pm FIRST rows")
+                filtered_df = sync.filter_sensor_data_by_hour(df)
+                
+                if filtered_df.empty:
+                    print(f"⚠ No data with time at 12pm or 8pm in sheet '{sheet_name}'")
+                    continue
+                
+                records = sync.transform_sensor_data(filtered_df, sheet_name)
+                created, skipped, failed = sync.sync_records(sync.sensor_table, records)
+            
+            total_created += created
+            total_skipped += skipped
+            total_failed += failed
+            
+            print(f"Sheet '{sheet_name}' sync: {created} created, {skipped} skipped, {failed} failed")
         
-        # Exit with error if any failed
-        if failed > 0:
+        # Print overall summary
+        print("\n" + "=" * 80)
+        print("Overall Sync Summary:")
+        print(f"  ✓ Total Created: {total_created}")
+        print(f"  ⏭ Total Skipped: {total_skipped} (already existed)")
+        print(f"  ✗ Total Failed:  {total_failed}")
+        print("=" * 80)
+        
+        # Don't exit with error if some succeeded
+        if total_failed > 0 and total_created == 0:
+            print("⚠ All records failed - exiting with error")
             sys.exit(1)
+        elif total_failed > 0:
+            print("⚠ Some records failed but some succeeded - exiting successfully")
             
     except Exception as e:
         print(f"\n❌ Error: {e}")
