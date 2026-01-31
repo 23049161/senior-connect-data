@@ -34,8 +34,8 @@ class ServiceNowSync:
             raise ValueError("Missing required ServiceNow credentials in environment variables")
         
         # Correct table names (with 's' at the end - plural!)
-        self.alert_table = "iot_alert_events"
-        self.sensor_table = "iot_sensor_records"
+        self.alert_table = "u_iot_alert_event"
+        self.sensor_table = "u_iot_sensor_record"
         
         self.headers = {
             "Content-Type": "application/json",
@@ -113,7 +113,7 @@ class ServiceNowSync:
     
     def transform_alert_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
-        Transform ALERTS sheet data for iot_alert_events table
+        Transform ALERTS sheet data for u_iot_alert_event table
         Pushes ALL data from the sheet
         
         ServiceNow fields based on screenshot:
@@ -152,7 +152,7 @@ class ServiceNowSync:
     
     def transform_sensor_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
-        Transform sensor sheet data for iot_sensor_records table
+        Transform sensor sheet data for u_iot_sensor_record table
         
         ServiceNow fields based on screenshot:
         - sensor_type_id
