@@ -2,21 +2,19 @@
 """
 Script to process Excel data and push to ServiceNow
 Requirements:
-- Only push FIRST data from 12pm and 8pm
-- Read data from ALL sheets
-- ALERTS sheet → iot_alert_event table
-- All other sheets → iot_sensor_record table
+- ALERTS sheet: Push ALL data, but only NEW records (no duplicates on re-runs)
+- Other sheets: Only push FIRST ROW where Timestamp Hour = 12:00 and FIRST ROW where Timestamp Hour = 20:00
 
 Excel columns:
 - Date (Column A)
-- Timestamp Hour (Column B)
+- Timestamp Hour (Column B) - Format: HH:MM:SS (e.g., 12:00, 18:00, 20:00)
 - Location (Column C)
 - Value (Column D)
 - Status (Column E)
 
 ServiceNow tables:
-- iot_alert_event: alert_id, sensor_type_id, alert_date, alert_time, location, severity, message
-- iot_sensor_record: sensor_record_id, sensor_type_id, record_date, record_time, location, numeric_value, text_value, status, is_active
+- iot_alert_event: For ALERTS sheet (all data)
+- iot_sensor_record: For other sheets (12pm and 8pm only)
 """
 import os
 import sys
@@ -56,100 +54,100 @@ class ServiceNowSync:
         
         return all_sheets
     
-    def filter_time_data(self, df: pd.DataFrame) -> pd.DataFrame:
+    def filter_sensor_data_by_time(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Filter to only get FIRST data from 12pm and 8pm
-        Uses the 'Date' and 'Timestamp Hour' columns
+        For SENSOR sheets only:
+        Filter to get FIRST ROW where Timestamp Hour = 12:00 
+        and FIRST ROW where Timestamp Hour = 20:00 (8pm)
         """
         if df.empty:
             return df
         
         print(f"Available columns: {list(df.columns)}")
         
-        # Check for required columns
-        if 'Date' not in df.columns or 'Timestamp Hour' not in df.columns:
-            print(f"⚠ Warning: Required columns 'Date' or 'Timestamp Hour' not found. Using all data.")
+        # Check for required column
+        if 'Timestamp Hour' not in df.columns:
+            print(f"⚠ Warning: 'Timestamp Hour' column not found. Using all data.")
             return df
         
-        # Create a combined datetime column
-        df['_datetime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Timestamp Hour'].astype(str), 
-                                         errors='coerce')
+        # Convert Timestamp Hour to time format for comparison
+        # Handle different formats: "18:00", "18:00:00", etc.
+        def parse_time_hour(time_str):
+            try:
+                time_str = str(time_str).strip()
+                # Try parsing as time
+                if ':' in time_str:
+                    parts = time_str.split(':')
+                    hour = int(parts[0])
+                    minute = int(parts[1]) if len(parts) > 1 else 0
+                    return time(hour, minute)
+                return None
+            except:
+                return None
         
-        # Remove rows with invalid timestamps
-        df = df.dropna(subset=['_datetime'])
+        df['_parsed_time'] = df['Timestamp Hour'].apply(parse_time_hour)
+        df = df.dropna(subset=['_parsed_time'])
         
         if df.empty:
-            print("⚠ No valid timestamps found after parsing")
+            print("⚠ No valid time values found")
             return df
         
-        print(f"Parsed {len(df)} rows with valid timestamps")
+        # Target times
+        target_12pm = time(12, 0)
+        target_8pm = time(20, 0)
         
-        # Extract time and date components
-        df['_time_only'] = df['_datetime'].dt.time
-        df['_date'] = df['_datetime'].dt.date
+        # Find FIRST row with 12:00
+        rows_12pm = df[df['_parsed_time'] == target_12pm]
         
-        # Define target times (12pm and 8pm)
-        target_time_12pm = time(12, 0)  # 12:00 PM
-        target_time_8pm = time(20, 0)   # 8:00 PM (20:00)
+        # Find FIRST row with 20:00
+        rows_8pm = df[df['_parsed_time'] == target_8pm]
         
         filtered_records = []
         
-        for date, group in df.groupby('_date'):
-            # Sort by time
-            group = group.sort_values('_datetime')
-            
-            # Find first record at or after 12pm
-            noon_records = group[group['_time_only'] >= target_time_12pm]
-            if not noon_records.empty:
-                filtered_records.append(noon_records.iloc[0])
-                print(f"  ✓ Selected 12pm record for {date}: {noon_records.iloc[0]['_datetime']}")
-            
-            # Find first record at or after 8pm
-            evening_records = group[group['_time_only'] >= target_time_8pm]
-            if not evening_records.empty:
-                first_evening = evening_records.iloc[0]
-                # Make sure it's different from the 12pm record
-                if not filtered_records or not first_evening['_datetime'] == filtered_records[-1]['_datetime']:
-                    filtered_records.append(first_evening)
-                    print(f"  ✓ Selected 8pm record for {date}: {first_evening['_datetime']}")
+        if not rows_12pm.empty:
+            first_12pm = rows_12pm.iloc[0]
+            filtered_records.append(first_12pm)
+            print(f"  ✓ Selected FIRST 12:00 row: Row {rows_12pm.index[0] + 2}")  # +2 for Excel row number
+        else:
+            print(f"  ⚠ No rows found with Timestamp Hour = 12:00")
         
-        # Create new dataframe from filtered records
+        if not rows_8pm.empty:
+            first_8pm = rows_8pm.iloc[0]
+            filtered_records.append(first_8pm)
+            print(f"  ✓ Selected FIRST 20:00 row: Row {rows_8pm.index[0] + 2}")  # +2 for Excel row number
+        else:
+            print(f"  ⚠ No rows found with Timestamp Hour = 20:00")
+        
+        # Create dataframe from filtered records
         if filtered_records:
             result_df = pd.DataFrame(filtered_records)
-            # Drop helper columns
-            result_df = result_df.drop(['_time_only', '_date', '_datetime'], axis=1, errors='ignore')
-            print(f"✓ Filtered to {len(result_df)} records (first at 12pm and 8pm each day)")
+            result_df = result_df.drop(['_parsed_time'], axis=1, errors='ignore')
+            print(f"✓ Filtered to {len(result_df)} row(s) (first at 12:00 and first at 20:00)")
             return result_df
         else:
-            print("⚠ No records found matching 12pm or 8pm criteria")
+            print("⚠ No records found matching 12:00 or 20:00 criteria")
             return pd.DataFrame()
     
     def transform_alert_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
         Transform ALERTS sheet data for iot_alert_event table
-        
-        Excel columns → ServiceNow fields:
-        - Date → alert_date
-        - Timestamp Hour → alert_time
-        - Location → location
-        - Value → severity (CRITICAL, MINIMAL, MODERATE)
-        - Status → message (FALL_DETECTED, etc.)
+        Pushes ALL data from the sheet
         """
         records = []
         
         for idx, row in df.iterrows():
-            # Extract date and time
+            # Extract data
             alert_date = str(row.get('Date', ''))
             alert_time = str(row.get('Timestamp Hour', ''))
             
             # Map the data
             record = {
-                'sensor_type_id': 'SENSOR 1',  # Based on your ServiceNow screenshot
+                'sensor_type_id': 'SENSOR 1',
                 'alert_date': alert_date,
                 'alert_time': alert_time,
                 'location': str(row.get('Location', '')),
-                'severity': str(row.get('Value', '')),  # CRITICAL, MINIMAL, MODERATE
-                'message': str(row.get('Status', '')),  # FALL_DETECTED, etc.
+                'severity': str(row.get('Value', '')),
+                'message': str(row.get('Status', '')),
             }
             
             # Filter out empty values
@@ -164,18 +162,12 @@ class ServiceNowSync:
     def transform_sensor_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
         Transform sensor sheet data for iot_sensor_record table
-        
-        Excel columns → ServiceNow fields:
-        - Date → record_date
-        - Timestamp Hour → record_time
-        - Location → location
-        - Value → numeric_value (if number) or text_value (if text)
-        - Status → status
+        Only processes filtered data (12pm and 8pm rows)
         """
         records = []
         
         for idx, row in df.iterrows():
-            # Extract date and time
+            # Extract data
             record_date = str(row.get('Date', ''))
             record_time = str(row.get('Timestamp Hour', ''))
             
@@ -185,20 +177,18 @@ class ServiceNowSync:
             text_value = ''
             
             try:
-                # Try to convert to float
                 numeric_value = str(float(value))
             except (ValueError, TypeError):
-                # If it fails, treat as text
                 text_value = str(value)
             
             # Map the data
             record = {
-                'sensor_type_id': 'SENSOR 1',  # Based on your ServiceNow screenshot
+                'sensor_type_id': 'SENSOR 1',
                 'record_date': record_date,
                 'record_time': record_time,
                 'location': str(row.get('Location', '')),
                 'status': str(row.get('Status', '')),
-                'is_active': 'false',  # Default from your screenshot
+                'is_active': 'false',
             }
             
             # Add numeric or text value
@@ -236,13 +226,17 @@ class ServiceNowSync:
                 # Create unique key from date + time + location
                 if table == self.alert_table:
                     date = record.get('alert_date', '')
-                    time = record.get('alert_time', '')
+                    time_val = record.get('alert_time', '')
+                    location = record.get('location', '')
+                    severity = record.get('severity', '')
+                    # For alerts, include severity to handle multiple alerts at same time/location
+                    key = f"{date}_{time_val}_{location}_{severity}"
                 else:
                     date = record.get('record_date', '')
-                    time = record.get('record_time', '')
+                    time_val = record.get('record_time', '')
+                    location = record.get('location', '')
+                    key = f"{date}_{time_val}_{location}"
                 
-                location = record.get('location', '')
-                key = f"{date}_{time}_{location}"
                 if key:
                     existing[key] = record['sys_id']
             
@@ -303,7 +297,7 @@ class ServiceNowSync:
             return False
     
     def sync_records(self, table: str, records: List[Dict]) -> tuple:
-        """Sync records to ServiceNow (create or update)"""
+        """Sync records to ServiceNow (create new records only, skip duplicates)"""
         if not records:
             print(f"No records to sync to {table}")
             return 0, 0, 0
@@ -311,32 +305,31 @@ class ServiceNowSync:
         existing = self.get_existing_records(table)
         
         created = 0
-        updated = 0
+        skipped = 0
         failed = 0
         
         for record in records:
             # Create unique identifier
             if table == self.alert_table:
                 date = record.get('alert_date', '')
-                time = record.get('alert_time', '')
+                time_val = record.get('alert_time', '')
+                location = record.get('location', '')
+                severity = record.get('severity', '')
+                identifier = f"{date}_{time_val}_{location}_{severity}"
             else:
                 date = record.get('record_date', '')
-                time = record.get('record_time', '')
+                time_val = record.get('record_time', '')
+                location = record.get('location', '')
+                identifier = f"{date}_{time_val}_{location}"
             
-            location = record.get('location', '')
-            identifier = f"{date}_{time}_{location}"
-            
-            if not date or not time:
+            if not date or not time_val:
                 print(f"⚠ Skipping record without date or time")
                 failed += 1
                 continue
             
             if identifier in existing:
-                # Update existing record
-                if self.update_record(table, existing[identifier], record):
-                    updated += 1
-                else:
-                    failed += 1
+                # Skip - already exists
+                skipped += 1
             else:
                 # Create new record
                 if self.create_record(table, record):
@@ -344,16 +337,17 @@ class ServiceNowSync:
                 else:
                     failed += 1
         
-        return created, updated, failed
+        if skipped > 0:
+            print(f"⏭ Skipped {skipped} existing record(s) (no duplicates created)")
+        
+        return created, skipped, failed
 
 def main():
     print("=" * 80)
     print("Starting ServiceNow Sync Process")
-    print("Custom Configuration:")
-    print("  - Filtering: First data at 12pm and 8pm only")
-    print("  - Reading: All sheets from Excel")
-    print("  - ALERTS sheet → iot_alert_event table")
-    print("  - Other sheets → iot_sensor_record table")
+    print("Configuration:")
+    print("  - ALERTS sheet: Push ALL data (only NEW records)")
+    print("  - Other sheets: Push FIRST row at 12:00 and FIRST row at 20:00 only")
     print("=" * 80)
     
     try:
@@ -369,7 +363,7 @@ def main():
             return
         
         total_created = 0
-        total_updated = 0
+        total_skipped = 0
         total_failed = 0
         
         # Process each sheet
@@ -382,43 +376,43 @@ def main():
                 print(f"⚠ Sheet '{sheet_name}' is empty, skipping")
                 continue
             
-            # Filter to get only first data at 12pm and 8pm
-            filtered_df = sync.filter_time_data(df)
-            
-            if filtered_df.empty:
-                print(f"⚠ No data matching time criteria in sheet '{sheet_name}'")
-                continue
-            
             # Check if this is the ALERTS sheet
             is_alert_sheet = sheet_name.upper() == 'ALERTS'
             
             if is_alert_sheet:
-                # Transform and sync to iot_alert_event
-                print(f"📢 Identified as ALERTS sheet → sending to iot_alert_event")
-                records = sync.transform_alert_data(filtered_df, sheet_name)
-                created, updated, failed = sync.sync_records(sync.alert_table, records)
+                # ALERTS: Push ALL data
+                print(f"📢 ALERTS sheet → Pushing ALL data to iot_alert_event")
+                print(f"Total rows in sheet: {len(df)}")
+                records = sync.transform_alert_data(df, sheet_name)
+                created, skipped, failed = sync.sync_records(sync.alert_table, records)
             else:
-                # Transform and sync to iot_sensor_record
-                print(f"📊 Identified as sensor sheet → sending to iot_sensor_record")
+                # OTHER SHEETS: Filter to 12pm and 8pm FIRST ROWS only
+                print(f"📊 Sensor sheet → Filtering for 12:00 and 20:00 FIRST rows")
+                filtered_df = sync.filter_sensor_data_by_time(df)
+                
+                if filtered_df.empty:
+                    print(f"⚠ No data matching time criteria in sheet '{sheet_name}'")
+                    continue
+                
                 records = sync.transform_sensor_data(filtered_df, sheet_name)
-                created, updated, failed = sync.sync_records(sync.sensor_table, records)
+                created, skipped, failed = sync.sync_records(sync.sensor_table, records)
             
             total_created += created
-            total_updated += updated
+            total_skipped += skipped
             total_failed += failed
             
-            print(f"Sheet '{sheet_name}' sync: {created} created, {updated} updated, {failed} failed")
+            print(f"Sheet '{sheet_name}' sync: {created} created, {skipped} skipped, {failed} failed")
         
         # Print overall summary
         print("\n" + "=" * 80)
         print("Overall Sync Summary:")
         print(f"  ✓ Total Created: {total_created}")
-        print(f"  ✓ Total Updated: {total_updated}")
+        print(f"  ⏭ Total Skipped: {total_skipped} (already existed)")
         print(f"  ✗ Total Failed:  {total_failed}")
         print("=" * 80)
         
-        # Exit with error if any failed
-        if total_failed > 0:
+        # Exit with error only if all records failed
+        if total_failed > 0 and total_created == 0:
             sys.exit(1)
             
     except Exception as e:
