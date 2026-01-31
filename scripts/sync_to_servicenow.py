@@ -34,8 +34,8 @@ class ServiceNowSync:
             raise ValueError("Missing required ServiceNow credentials in environment variables")
         
         # Correct table names (with 's' at the end - plural!)
-        self.alert_table = "u_iot_alert_event"
-        self.sensor_table = "u_iot_sensor_record"
+        self.alert_table = "x_1855398_elderl_0_iot_alert_event"
+        self.sensor_table = "x_1855398_elderl_0_iot_sensor_record"
         
         self.headers = {
             "Content-Type": "application/json",
