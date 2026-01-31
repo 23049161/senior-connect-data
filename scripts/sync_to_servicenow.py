@@ -13,9 +13,9 @@ Excel columns (actual structure):
 - Value (Column E)
 - Status (Column F)
 
-ServiceNow tables (from screenshots):
-- iot_alert_events (plural!) - For ALERTS sheet
-- iot_sensor_records (plural!) - For sensor sheets
+ServiceNow tables:
+- x_1855398_elderl_0_iot_alert_event - For ALERTS sheet
+- x_1855398_elderl_0_iot_sensor_record - For sensor sheets
 """
 import os
 import sys
@@ -33,7 +33,7 @@ class ServiceNowSync:
         if not all([self.instance, self.username, self.password]):
             raise ValueError("Missing required ServiceNow credentials in environment variables")
         
-        # Correct table names (with 's' at the end - plural!)
+        # Correct table names with app scope prefix
         self.alert_table = "x_1855398_elderl_0_iot_alert_event"
         self.sensor_table = "x_1855398_elderl_0_iot_sensor_record"
         
@@ -58,8 +58,8 @@ class ServiceNowSync:
     def filter_sensor_data_by_hour(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         For SENSOR sheets only:
-        Filter to get FIRST ROW where Hour = 12 
-        and FIRST ROW where Hour = 20
+        Filter to get FIRST ROW with time at 12pm (noon)
+        and FIRST ROW with time at 8pm (20:00)
         """
         if df.empty:
             return df
@@ -67,53 +67,56 @@ class ServiceNowSync:
         print(f"Available columns: {list(df.columns)}")
         
         # Check for required column
-        if 'Hour' not in df.columns:
-            print(f"⚠ Warning: 'Hour' column not found. Using all data.")
+        if 'Timestamp' not in df.columns:
+            print(f"⚠ Warning: 'Timestamp' column not found. Using all data.")
             return df
         
-        # Convert Hour to integer for comparison
-        df['_hour_int'] = pd.to_numeric(df['Hour'], errors='coerce')
-        df = df.dropna(subset=['_hour_int'])
+        # Convert Timestamp to datetime and extract hour
+        df['_timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+        df = df.dropna(subset=['_timestamp'])
         
         if df.empty:
-            print("⚠ No valid hour values found")
+            print("⚠ No valid timestamp values found")
             return df
         
-        # Find FIRST row with Hour = 12
-        rows_12 = df[df['_hour_int'] == 12]
+        # Extract hour from timestamp
+        df['_hour'] = df['_timestamp'].dt.hour
         
-        # Find FIRST row with Hour = 20
-        rows_20 = df[df['_hour_int'] == 20]
+        # Find FIRST row with time at 12pm (hour = 12)
+        rows_12pm = df[df['_hour'] == 12]
+        
+        # Find FIRST row with time at 8pm (hour = 20)
+        rows_8pm = df[df['_hour'] == 20]
         
         filtered_records = []
         
-        if not rows_12.empty:
-            first_12 = rows_12.iloc[0]
-            filtered_records.append(first_12)
-            print(f"  ✓ Selected FIRST Hour=12 row: Excel row {rows_12.index[0] + 2}")
+        if not rows_12pm.empty:
+            first_12pm = rows_12pm.iloc[0]
+            filtered_records.append(first_12pm)
+            print(f"  ✓ Selected FIRST 12pm row: Excel row {rows_12pm.index[0] + 2}, Time: {first_12pm['Timestamp']}")
         else:
-            print(f"  ⚠ No rows found with Hour = 12")
+            print(f"  ⚠ No rows found with time at 12pm")
         
-        if not rows_20.empty:
-            first_20 = rows_20.iloc[0]
-            filtered_records.append(first_20)
-            print(f"  ✓ Selected FIRST Hour=20 row: Excel row {rows_20.index[0] + 2}")
+        if not rows_8pm.empty:
+            first_8pm = rows_8pm.iloc[0]
+            filtered_records.append(first_8pm)
+            print(f"  ✓ Selected FIRST 8pm row: Excel row {rows_8pm.index[0] + 2}, Time: {first_8pm['Timestamp']}")
         else:
-            print(f"  ⚠ No rows found with Hour = 20")
+            print(f"  ⚠ No rows found with time at 8pm")
         
         # Create dataframe from filtered records
         if filtered_records:
             result_df = pd.DataFrame(filtered_records)
-            result_df = result_df.drop(['_hour_int'], axis=1, errors='ignore')
+            result_df = result_df.drop(['_timestamp', '_hour'], axis=1, errors='ignore')
             print(f"✓ Filtered to {len(result_df)} row(s)")
             return result_df
         else:
-            print("⚠ No records found matching Hour 12 or 20 criteria")
+            print("⚠ No records found with time at 12pm or 8pm")
             return pd.DataFrame()
     
     def transform_alert_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
-        Transform ALERTS sheet data for u_iot_alert_event table
+        Transform ALERTS sheet data for iot_alert_event table
         Pushes ALL data from the sheet
         
         ServiceNow fields based on screenshot:
@@ -152,7 +155,7 @@ class ServiceNowSync:
     
     def transform_sensor_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
-        Transform sensor sheet data for u_iot_sensor_record table
+        Transform sensor sheet data for iot_sensor_record table
         
         ServiceNow fields based on screenshot:
         - sensor_type_id
@@ -327,7 +330,7 @@ def main():
     print("Starting ServiceNow Sync Process")
     print("Configuration:")
     print("  - ALERTS sheet: Push ALL data (only NEW records)")
-    print("  - Other sheets: Push FIRST row where Hour=12 and FIRST row where Hour=20")
+    print("  - Other sheets: Push FIRST row with time at 12pm and FIRST row with time at 8pm")
     print("=" * 80)
     
     try:
@@ -366,12 +369,12 @@ def main():
                 records = sync.transform_alert_data(df, sheet_name)
                 created, skipped, failed = sync.sync_records(sync.alert_table, records)
             else:
-                # OTHER SHEETS: Filter to Hour=12 and Hour=20 FIRST ROWS only
-                print(f"📊 Sensor sheet → Filtering for Hour=12 and Hour=20 FIRST rows")
+                # OTHER SHEETS: Filter to time at 12pm and 8pm FIRST ROWS only
+                print(f"📊 Sensor sheet → Filtering for time at 12pm and 8pm FIRST rows")
                 filtered_df = sync.filter_sensor_data_by_hour(df)
                 
                 if filtered_df.empty:
-                    print(f"⚠ No data matching hour criteria in sheet '{sheet_name}'")
+                    print(f"⚠ No data with time at 12pm or 8pm in sheet '{sheet_name}'")
                     continue
                 
                 records = sync.transform_sensor_data(filtered_df, sheet_name)
