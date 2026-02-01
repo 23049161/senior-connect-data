@@ -11,8 +11,8 @@ on:
     paths:
       - 'SeniorConnect_MasterLog.xlsx'
   schedule:
-    # Run every 4 hours: 12pm, 4pm, 8pm, 12am, 4am, 8am (UTC)
-    - cron: '0 0,4,8,12,16,20 * * *'
+    # Run every hour
+    - cron: '0 * * * *'
   workflow_dispatch: # Allow manual trigger
   
 jobs:
