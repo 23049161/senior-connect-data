@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""
-Script to process Excel data and push to ServiceNow
-Requirements:
-- ALERTS sheet: Push ALL data, but only NEW records (no duplicates on re-runs)
-- Other sheets: Only push FIRST ROW where Hour = 12 and FIRST ROW where Hour = 20
-
-Excel columns (actual structure):
-- Date (Column A)
-- Timestamp (Column B) 
-- Hour (Column C) - Contains hour value like 12, 18, 20
-- Location (Column D)
-- Value (Column E)
-- Status (Column F)
-
-ServiceNow tables:
-- x_1855398_elderl_0_iot_alert_event - For ALERTS sheet
-- x_1855398_elderl_0_iot_sensor_record - For sensor sheets
-- x_1855398_elderl_0_sensor_type - For sensor type mapping
-"""
 import os
 import sys
 import pandas as pd
@@ -162,20 +142,35 @@ class ServiceNowSync:
         Match Excel sheet name to sensor type from ServiceNow
         Sheet names match type_name field in sensor_type table
         e.g., "Humidity" sheet → find sensor with type_name = "Humidity"
+        
+        Special case: Any sheet with "mmwave" in name → SENSOR 5 (mmWave)
         """
         # Normalize sheet name for matching
         sheet_name_normalized = sheet_name.strip()
+        sheet_name_lower = sheet_name_normalized.lower()
         
-        # Check if sheet name matches any sensor type_name
+        # Special case: Check if sheet name contains "mmwave" (case-insensitive)
+        if 'mmwave' in sheet_name_lower:
+            # Find the mmWave sensor type
+            for type_name, sensor_info in self.sensor_types.items():
+                if type_name.lower() == 'mmwave':
+                    sensor_type_id = sensor_info['sensor_type_id']
+                    print(f"  Matched sheet '{sheet_name}' (contains 'mmwave') → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
+                    return sensor_type_id
+            # If mmWave sensor type not found in table, use SENSOR 5 as default
+            print(f"  Matched sheet '{sheet_name}' (contains 'mmwave') → Using default SENSOR 5")
+            return 'SENSOR 5'
+        
+        # Check if sheet name matches any sensor type_name exactly
         if sheet_name_normalized in self.sensor_types:
             sensor_info = self.sensor_types[sheet_name_normalized]
             sensor_type_id = sensor_info['sensor_type_id']
             print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
             return sensor_type_id
         
-        # If no match, try case-insensitive matching
+        # If no exact match, try case-insensitive matching
         for type_name, sensor_info in self.sensor_types.items():
-            if type_name.lower() == sheet_name_normalized.lower():
+            if type_name.lower() == sheet_name_lower:
                 sensor_type_id = sensor_info['sensor_type_id']
                 print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
                 return sensor_type_id
