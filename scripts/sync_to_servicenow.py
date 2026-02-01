@@ -16,6 +16,7 @@ Excel columns (actual structure):
 ServiceNow tables:
 - x_1855398_elderl_0_iot_alert_event - For ALERTS sheet
 - x_1855398_elderl_0_iot_sensor_record - For sensor sheets
+- x_1855398_elderl_0_sensor_type - For sensor type mapping
 """
 import os
 import sys
@@ -36,11 +37,53 @@ class ServiceNowSync:
         # Correct table names with app scope prefix
         self.alert_table = "x_1855398_elderl_0_iot_alert_event"
         self.sensor_table = "x_1855398_elderl_0_iot_sensor_record"
+        self.sensor_type_table = "x_1855398_elderl_0_sensor_type"
         
         self.headers = {
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        
+        # Cache for sensor types
+        self.sensor_types = {}
+        
+    def get_sensor_types(self) -> Dict[str, Dict]:
+        """Fetch sensor types from ServiceNow"""
+        print(f"Fetching sensor types from {self.sensor_type_table}...")
+        
+        base_url = f"https://{self.instance}.service-now.com/api/now/table/{self.sensor_type_table}"
+        
+        try:
+            response = requests.get(
+                base_url,
+                auth=(self.username, self.password),
+                headers=self.headers,
+                params={'sysparm_limit': 1000},
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            sensor_types = {}
+            for record in response.json().get('result', []):
+                sensor_type_id = record.get('sensor_type_id', '')
+                type_name = record.get('type_name', '')
+                
+                # Map by type_name (PIR, Temperature, Humidity, Proximity, mmWave)
+                if type_name:
+                    sensor_types[type_name] = {
+                        'sensor_type_id': sensor_type_id,
+                        'type_name': type_name,
+                        'elderly_id': record.get('elderly_id', '')
+                    }
+                    print(f"  Found sensor: {sensor_type_id} - {type_name}")
+            
+            print(f"Loaded {len(sensor_types)} sensor types")
+            return sensor_types
+            
+        except requests.exceptions.RequestException as e:
+            print(f"⚠ Error fetching sensor types: {e}")
+            print(f"⚠ Continuing without sensor type mapping")
+            return {}
         
     def read_all_sheets(self, file_path: str) -> Dict[str, pd.DataFrame]:
         """Read all sheets from Excel file"""
@@ -114,6 +157,33 @@ class ServiceNowSync:
             print("⚠ No records found with time at 12pm or 8pm")
             return pd.DataFrame()
     
+    def get_sensor_type_id_for_sheet(self, sheet_name: str) -> str:
+        """
+        Match Excel sheet name to sensor type from ServiceNow
+        Sheet names match type_name field in sensor_type table
+        e.g., "Humidity" sheet → find sensor with type_name = "Humidity"
+        """
+        # Normalize sheet name for matching
+        sheet_name_normalized = sheet_name.strip()
+        
+        # Check if sheet name matches any sensor type_name
+        if sheet_name_normalized in self.sensor_types:
+            sensor_info = self.sensor_types[sheet_name_normalized]
+            sensor_type_id = sensor_info['sensor_type_id']
+            print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
+            return sensor_type_id
+        
+        # If no match, try case-insensitive matching
+        for type_name, sensor_info in self.sensor_types.items():
+            if type_name.lower() == sheet_name_normalized.lower():
+                sensor_type_id = sensor_info['sensor_type_id']
+                print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
+                return sensor_type_id
+        
+        # No match found
+        print(f"  ⚠ No sensor type found for sheet '{sheet_name}', using default 'SENSOR 1'")
+        return 'SENSOR 1'
+    
     def transform_alert_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
         Transform ALERTS sheet data for iot_alert_event table
@@ -129,6 +199,9 @@ class ServiceNowSync:
         """
         records = []
         
+        # For alerts, we'll use SENSOR 1 or try to match if possible
+        sensor_type_id = 'SENSOR 1'
+        
         for idx, row in df.iterrows():
             # Combine Date and Timestamp for the date/time fields
             alert_date = str(row.get('Date', ''))
@@ -136,7 +209,7 @@ class ServiceNowSync:
             
             # Map the data
             record = {
-                'sensor_type_id': 'SENSOR 1',
+                'sensor_type_id': sensor_type_id,
                 'alert_date': alert_date,
                 'alert_time': timestamp,
                 'location': str(row.get('Location', '')),
@@ -168,6 +241,9 @@ class ServiceNowSync:
         """
         records = []
         
+        # Get the correct sensor_type_id for this sheet
+        sensor_type_id = self.get_sensor_type_id_for_sheet(sheet_name)
+        
         for idx, row in df.iterrows():
             # Extract data
             record_date = str(row.get('Date', ''))
@@ -185,7 +261,7 @@ class ServiceNowSync:
             
             # Map the data
             record = {
-                'sensor_type_id': 'SENSOR 1',
+                'sensor_type_id': sensor_type_id,
                 'record_date': record_date,
                 'record_time': timestamp,
                 'location': str(row.get('Location', '')),
@@ -226,18 +302,20 @@ class ServiceNowSync:
             
             existing = {}
             for record in response.json().get('result', []):
-                # Create unique key from date + time + location
+                # Create unique key from date + time + location + sensor_type_id
                 if table == self.alert_table:
                     date = record.get('alert_date', '')
                     time_val = record.get('alert_time', '')
                     location = record.get('location', '')
                     severity = record.get('severity', '')
-                    key = f"{date}_{time_val}_{location}_{severity}"
+                    sensor_id = record.get('sensor_type_id', '')
+                    key = f"{date}_{time_val}_{location}_{severity}_{sensor_id}"
                 else:
                     date = record.get('record_date', '')
                     time_val = record.get('record_time', '')
                     location = record.get('location', '')
-                    key = f"{date}_{time_val}_{location}"
+                    sensor_id = record.get('sensor_type_id', '')
+                    key = f"{date}_{time_val}_{location}_{sensor_id}"
                 
                 if key:
                     existing[key] = record['sys_id']
@@ -265,10 +343,11 @@ class ServiceNowSync:
             response.raise_for_status()
             
             location = data.get('location', 'Unknown')
+            sensor_id = data.get('sensor_type_id', 'Unknown')
             if table == self.alert_table:
-                identifier = f"{data.get('alert_date')} {data.get('alert_time')} - {location}"
+                identifier = f"{data.get('alert_date')} {data.get('alert_time')} - {location} - {sensor_id}"
             else:
-                identifier = f"{data.get('record_date')} {data.get('record_time')} - {location}"
+                identifier = f"{data.get('record_date')} {data.get('record_time')} - {location} - {sensor_id}"
             
             print(f"✓ Created record in {table}: {identifier}")
             return True
@@ -298,12 +377,14 @@ class ServiceNowSync:
                 time_val = record.get('alert_time', '')
                 location = record.get('location', '')
                 severity = record.get('severity', '')
-                identifier = f"{date}_{time_val}_{location}_{severity}"
+                sensor_id = record.get('sensor_type_id', '')
+                identifier = f"{date}_{time_val}_{location}_{severity}_{sensor_id}"
             else:
                 date = record.get('record_date', '')
                 time_val = record.get('record_time', '')
                 location = record.get('location', '')
-                identifier = f"{date}_{time_val}_{location}"
+                sensor_id = record.get('sensor_type_id', '')
+                identifier = f"{date}_{time_val}_{location}_{sensor_id}"
             
             if not date or not time_val:
                 print(f"⚠ Skipping record without date or time: {record}")
@@ -331,11 +412,15 @@ def main():
     print("Configuration:")
     print("  - ALERTS sheet: Push ALL data (only NEW records)")
     print("  - Other sheets: Push FIRST row with time at 12pm and FIRST row with time at 8pm")
+    print("  - Using sensor_type table to match sensors with Excel sheets")
     print("=" * 80)
     
     try:
         # Initialize sync client
         sync = ServiceNowSync()
+        
+        # Load sensor types from ServiceNow
+        sync.sensor_types = sync.get_sensor_types()
         
         # Read all sheets from Excel
         excel_file = "SeniorConnect_MasterLog.xlsx"
