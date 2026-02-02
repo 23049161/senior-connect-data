@@ -249,10 +249,26 @@ class ServiceNowSync:
             numeric_value = ''
             text_value = ''
             
-            try:
-                numeric_value = str(float(value))
-            except (ValueError, TypeError):
-                text_value = str(value)
+            # Convert value to string for checking
+            value_str = str(value).strip()
+            
+            # Skip if value is NaN, NaT, empty, or looks like a date/time
+            if value_str in ['nan', 'NaT', '', 'None']:
+                text_value = ''
+            # Check if it's a timestamp/date format (contains colons or dashes in date pattern)
+            elif ':' in value_str or (len(value_str) >= 8 and value_str.count('-') >= 2):
+                # This looks like a time or date, treat as text
+                text_value = value_str
+            else:
+                # Try to parse as numeric (handles integers, floats, percentages, degrees)
+                try:
+                    # Clean the value - remove common non-numeric suffixes
+                    clean_value = value_str.replace('%', '').replace('°C', '').replace('°F', '').replace('°', '').strip()
+                    numeric_val = float(clean_value)
+                    numeric_value = str(numeric_val)
+                except (ValueError, TypeError, AttributeError):
+                    # Not numeric, use as text
+                    text_value = value_str
             
             # Map the data
             record = {
@@ -264,10 +280,10 @@ class ServiceNowSync:
                 'is_active': 'false',
             }
             
-            # Add numeric or text value
+            # Add numeric or text value (prefer numeric if both are set)
             if numeric_value and numeric_value != 'nan':
                 record['numeric_value'] = numeric_value
-            if text_value and text_value != 'nan':
+            elif text_value and text_value != 'nan':
                 record['text_value'] = text_value
             
             # Filter out empty values
@@ -297,20 +313,27 @@ class ServiceNowSync:
             
             existing = {}
             for record in response.json().get('result', []):
-                # Create unique key from date + time + location + sensor_type_id
+                # Create unique key from ALL relevant fields to detect exact duplicates
                 if table == self.alert_table:
                     date = record.get('alert_date', '')
                     time_val = record.get('alert_time', '')
                     location = record.get('location', '')
                     severity = record.get('severity', '')
+                    message = record.get('message', '')
                     sensor_id = record.get('sensor_type_id', '')
-                    key = f"{date}_{time_val}_{location}_{severity}_{sensor_id}"
+                    key = f"{date}_{time_val}_{location}_{severity}_{message}_{sensor_id}"
                 else:
+                    # For sensor records, include ALL fields in key to detect exact duplicates
                     date = record.get('record_date', '')
                     time_val = record.get('record_time', '')
                     location = record.get('location', '')
                     sensor_id = record.get('sensor_type_id', '')
-                    key = f"{date}_{time_val}_{location}_{sensor_id}"
+                    status = record.get('status', '')
+                    numeric_val = record.get('numeric_value', '')
+                    text_val = record.get('text_value', '')
+                    is_active = record.get('is_active', '')
+                    # Create comprehensive key with ALL columns
+                    key = f"{date}_{time_val}_{location}_{sensor_id}_{status}_{numeric_val}_{text_val}_{is_active}"
                 
                 if key:
                     existing[key] = record['sys_id']
@@ -366,20 +389,26 @@ class ServiceNowSync:
         failed = 0
         
         for record in records:
-            # Create unique identifier
+            # Create unique identifier matching ALL fields
             if table == self.alert_table:
                 date = record.get('alert_date', '')
                 time_val = record.get('alert_time', '')
                 location = record.get('location', '')
                 severity = record.get('severity', '')
+                message = record.get('message', '')
                 sensor_id = record.get('sensor_type_id', '')
-                identifier = f"{date}_{time_val}_{location}_{severity}_{sensor_id}"
+                identifier = f"{date}_{time_val}_{location}_{severity}_{message}_{sensor_id}"
             else:
+                # For sensor records, use ALL fields to detect exact duplicates
                 date = record.get('record_date', '')
                 time_val = record.get('record_time', '')
                 location = record.get('location', '')
                 sensor_id = record.get('sensor_type_id', '')
-                identifier = f"{date}_{time_val}_{location}_{sensor_id}"
+                status = record.get('status', '')
+                numeric_val = record.get('numeric_value', '')
+                text_val = record.get('text_value', '')
+                is_active = record.get('is_active', 'false')
+                identifier = f"{date}_{time_val}_{location}_{sensor_id}_{status}_{numeric_val}_{text_val}_{is_active}"
             
             if not date or not time_val:
                 print(f"⚠ Skipping record without date or time: {record}")
