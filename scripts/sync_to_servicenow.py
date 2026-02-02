@@ -295,6 +295,43 @@ class ServiceNowSync:
         print(f"Transformed {len(records)} sensor records from sheet '{sheet_name}'")
         return records
     
+    def normalize_value(self, value) -> str:
+        """Normalize values for consistent comparison"""
+        if value is None or value == '':
+            return ''
+        
+        value_str = str(value).strip()
+        
+        # Normalize common variations
+        if value_str.lower() in ['nan', 'nat', 'none', 'null']:
+            return ''
+        
+        # For time values, normalize to remove microseconds and timezone info
+        # e.g., "20:57:45.000" -> "20:57:45"
+        if ':' in value_str and len(value_str) > 5:
+            # Remove microseconds if present
+            if '.' in value_str:
+                value_str = value_str.split('.')[0]
+            # Remove timezone info if present
+            if '+' in value_str:
+                value_str = value_str.split('+')[0].strip()
+            if value_str.endswith('Z'):
+                value_str = value_str[:-1].strip()
+        
+        # Normalize numeric values to consistent format
+        try:
+            # If it's a number, normalize it
+            num = float(value_str)
+            # Remove trailing zeros and decimal point if integer
+            if num == int(num):
+                return str(int(num))
+            else:
+                return str(num)
+        except (ValueError, TypeError):
+            pass
+        
+        return value_str
+    
     def get_existing_records(self, table: str) -> Dict[str, str]:
         """Fetch existing records from ServiceNow to check for duplicates"""
         print(f"Fetching existing records from {table}...")
@@ -315,25 +352,25 @@ class ServiceNowSync:
             for record in response.json().get('result', []):
                 # Create unique key from ALL relevant fields to detect exact duplicates
                 if table == self.alert_table:
-                    date = record.get('alert_date', '')
-                    time_val = record.get('alert_time', '')
-                    location = record.get('location', '')
-                    severity = record.get('severity', '')
-                    message = record.get('message', '')
-                    sensor_id = record.get('sensor_type_id', '')
-                    key = f"{date}_{time_val}_{location}_{severity}_{message}_{sensor_id}"
+                    date = self.normalize_value(record.get('alert_date', ''))
+                    time_val = self.normalize_value(record.get('alert_time', ''))
+                    location = self.normalize_value(record.get('location', ''))
+                    severity = self.normalize_value(record.get('severity', ''))
+                    message = self.normalize_value(record.get('message', ''))
+                    sensor_id = self.normalize_value(record.get('sensor_type_id', ''))
+                    key = f"{date}|{time_val}|{location}|{severity}|{message}|{sensor_id}"
                 else:
                     # For sensor records, include ALL fields in key to detect exact duplicates
-                    date = record.get('record_date', '')
-                    time_val = record.get('record_time', '')
-                    location = record.get('location', '')
-                    sensor_id = record.get('sensor_type_id', '')
-                    status = record.get('status', '')
-                    numeric_val = record.get('numeric_value', '')
-                    text_val = record.get('text_value', '')
-                    is_active = record.get('is_active', '')
+                    date = self.normalize_value(record.get('record_date', ''))
+                    time_val = self.normalize_value(record.get('record_time', ''))
+                    location = self.normalize_value(record.get('location', ''))
+                    sensor_id = self.normalize_value(record.get('sensor_type_id', ''))
+                    status = self.normalize_value(record.get('status', ''))
+                    numeric_val = self.normalize_value(record.get('numeric_value', ''))
+                    text_val = self.normalize_value(record.get('text_value', ''))
+                    is_active = self.normalize_value(record.get('is_active', ''))
                     # Create comprehensive key with ALL columns
-                    key = f"{date}_{time_val}_{location}_{sensor_id}_{status}_{numeric_val}_{text_val}_{is_active}"
+                    key = f"{date}|{time_val}|{location}|{sensor_id}|{status}|{numeric_val}|{text_val}|{is_active}"
                 
                 if key:
                     existing[key] = record['sys_id']
@@ -389,26 +426,26 @@ class ServiceNowSync:
         failed = 0
         
         for record in records:
-            # Create unique identifier matching ALL fields
+            # Create unique identifier matching ALL fields with normalization
             if table == self.alert_table:
-                date = record.get('alert_date', '')
-                time_val = record.get('alert_time', '')
-                location = record.get('location', '')
-                severity = record.get('severity', '')
-                message = record.get('message', '')
-                sensor_id = record.get('sensor_type_id', '')
-                identifier = f"{date}_{time_val}_{location}_{severity}_{message}_{sensor_id}"
+                date = self.normalize_value(record.get('alert_date', ''))
+                time_val = self.normalize_value(record.get('alert_time', ''))
+                location = self.normalize_value(record.get('location', ''))
+                severity = self.normalize_value(record.get('severity', ''))
+                message = self.normalize_value(record.get('message', ''))
+                sensor_id = self.normalize_value(record.get('sensor_type_id', ''))
+                identifier = f"{date}|{time_val}|{location}|{severity}|{message}|{sensor_id}"
             else:
-                # For sensor records, use ALL fields to detect exact duplicates
-                date = record.get('record_date', '')
-                time_val = record.get('record_time', '')
-                location = record.get('location', '')
-                sensor_id = record.get('sensor_type_id', '')
-                status = record.get('status', '')
-                numeric_val = record.get('numeric_value', '')
-                text_val = record.get('text_value', '')
-                is_active = record.get('is_active', 'false')
-                identifier = f"{date}_{time_val}_{location}_{sensor_id}_{status}_{numeric_val}_{text_val}_{is_active}"
+                # For sensor records, use ALL fields with normalization to detect exact duplicates
+                date = self.normalize_value(record.get('record_date', ''))
+                time_val = self.normalize_value(record.get('record_time', ''))
+                location = self.normalize_value(record.get('location', ''))
+                sensor_id = self.normalize_value(record.get('sensor_type_id', ''))
+                status = self.normalize_value(record.get('status', ''))
+                numeric_val = self.normalize_value(record.get('numeric_value', ''))
+                text_val = self.normalize_value(record.get('text_value', ''))
+                is_active = self.normalize_value(record.get('is_active', 'false'))
+                identifier = f"{date}|{time_val}|{location}|{sensor_id}|{status}|{numeric_val}|{text_val}|{is_active}"
             
             if not date or not time_val:
                 print(f"⚠ Skipping record without date or time: {record}")
@@ -417,6 +454,7 @@ class ServiceNowSync:
             
             if identifier in existing:
                 # Skip - already exists
+                print(f"  ⏭ Skipping duplicate: {date} {time_val} - {location} - {sensor_id}")
                 skipped += 1
             else:
                 # Create new record
