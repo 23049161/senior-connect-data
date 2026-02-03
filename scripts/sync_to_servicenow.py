@@ -1,23 +1,3 @@
-#!/usr/bin/env python3
-"""
-Script to process Excel data and push to ServiceNow
-Requirements:
-- ALERTS sheet: Push ALL data, but only NEW records (no duplicates on re-runs)
-- Other sheets: Only push FIRST ROW where Hour = 12 and FIRST ROW where Hour = 20
-
-Excel columns (actual structure):
-- Date (Column A)
-- Timestamp (Column B) 
-- Hour (Column C) - Contains hour value like 12, 18, 20
-- Location (Column D)
-- Value (Column E)
-- Status (Column F)
-
-ServiceNow tables:
-- x_1855398_elderl_0_iot_alert_event - For ALERTS sheet
-- x_1855398_elderl_0_iot_sensor_record - For sensor sheets
-- x_1855398_elderl_0_sensor_type - For sensor type mapping
-"""
 import os
 import sys
 import pandas as pd
