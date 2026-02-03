@@ -63,17 +63,20 @@ class ServiceNowSync:
             
             sensor_types = {}
             for record in response.json().get('result', []):
+                # Use sys_id as the reference value (this is what ServiceNow needs)
+                sys_id = record.get('sys_id', '')
                 sensor_type_id = record.get('sensor_type_id', '')
                 type_name = record.get('type_name', '')
                 
                 # Map by type_name (PIR, Temperature, Humidity, Proximity, mmWave)
                 if type_name:
                     sensor_types[type_name] = {
-                        'sensor_type_id': sensor_type_id,
+                        'sys_id': sys_id,  # This is the actual reference value
+                        'sensor_type_id': sensor_type_id,  # Display value (e.g., "SENSOR 1")
                         'type_name': type_name,
                         'elderly_id': record.get('elderly_id', '')
                     }
-                    print(f"  Found sensor: {sensor_type_id} - {type_name}")
+                    print(f"  Found sensor: {sensor_type_id} ({type_name}) - sys_id: {sys_id}")
             
             print(f"Loaded {len(sensor_types)} sensor types")
             return sensor_types
@@ -159,9 +162,11 @@ class ServiceNowSync:
         """
         Match Excel sheet name to sensor type from ServiceNow
         Sheet names match type_name field in sensor_type table
-        e.g., "Humidity" sheet → find sensor with type_name = "Humidity"
+        e.g., "Humidity" sheet → find sensor with type_name = "Humidity" → return its sys_id
         
         Special case: Any sheet with "mmwave" in name → SENSOR 5 (mmWave)
+        
+        Returns the sys_id of the sensor_type record (for reference field)
         """
         # Normalize sheet name for matching
         sheet_name_normalized = sheet_name.strip()
@@ -172,38 +177,41 @@ class ServiceNowSync:
             # Find the mmWave sensor type
             for type_name, sensor_info in self.sensor_types.items():
                 if type_name.lower() == 'mmwave':
-                    sensor_type_id = sensor_info['sensor_type_id']
-                    print(f"  Matched sheet '{sheet_name}' (contains 'mmwave') → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
-                    return sensor_type_id
-            # If mmWave sensor type not found in table, use SENSOR 5 as default
-            print(f"  Matched sheet '{sheet_name}' (contains 'mmwave') → Using default SENSOR 5")
-            return 'SENSOR 5'
+                    sys_id = sensor_info['sys_id']
+                    print(f"  Matched sheet '{sheet_name}' (contains 'mmwave') → Sensor: {sensor_info['sensor_type_id']} ({sensor_info['type_name']}) - sys_id: {sys_id}")
+                    return sys_id
+            # If mmWave sensor type not found in table, log warning
+            print(f"  ⚠ mmWave sensor not found in sensor_type table for sheet '{sheet_name}'")
+            return ''
         
         # Check if sheet name matches any sensor type_name exactly
         if sheet_name_normalized in self.sensor_types:
             sensor_info = self.sensor_types[sheet_name_normalized]
-            sensor_type_id = sensor_info['sensor_type_id']
-            print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
-            return sensor_type_id
+            sys_id = sensor_info['sys_id']
+            print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_info['sensor_type_id']} ({sensor_info['type_name']}) - sys_id: {sys_id}")
+            return sys_id
         
         # If no exact match, try case-insensitive matching
         for type_name, sensor_info in self.sensor_types.items():
             if type_name.lower() == sheet_name_lower:
-                sensor_type_id = sensor_info['sensor_type_id']
-                print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_type_id} ({sensor_info['type_name']})")
-                return sensor_type_id
+                sys_id = sensor_info['sys_id']
+                print(f"  Matched sheet '{sheet_name}' → Sensor: {sensor_info['sensor_type_id']} ({sensor_info['type_name']}) - sys_id: {sys_id}")
+                return sys_id
         
         # No match found
-        print(f"  ⚠ No sensor type found for sheet '{sheet_name}', using default 'SENSOR 1'")
-        return 'SENSOR 1'
+        print(f"  ⚠ No sensor type found for sheet '{sheet_name}'")
+        return ''
     
     def transform_alert_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
         """
         Transform ALERTS sheet data for iot_alert_event table
         Pushes ALL data from the sheet
         
-        ServiceNow fields based on screenshot:
-        - sensor_type_id
+        For alerts, determine which sensor triggered it (PIR, Proximity, or Humidity)
+        and use the sys_id from the sensor_type table
+        
+        ServiceNow fields:
+        - sensor_type_id (reference to sensor_type table - uses sys_id)
         - alert_date
         - alert_time
         - location
@@ -212,22 +220,75 @@ class ServiceNowSync:
         """
         records = []
         
-        # For alerts, use ALERT MONITOR SENSOR 1,3,4
-        sensor_type_id = 'ALERT MONITOR SENSOR 1,3,4'
+        print(f"Alert sheet columns: {list(df.columns)}")
+        
+        # Get sys_ids for alert sensors (PIR, Proximity, Humidity)
+        pir_sys_id = self.sensor_types.get('PIR', {}).get('sys_id', '')
+        proximity_sys_id = self.sensor_types.get('Proximity', {}).get('sys_id', '')
+        humidity_sys_id = self.sensor_types.get('Humidity', {}).get('sys_id', '')
+        
+        print(f"Alert sensor mappings:")
+        print(f"  PIR: {pir_sys_id}")
+        print(f"  Proximity: {proximity_sys_id}")
+        print(f"  Humidity: {humidity_sys_id}")
         
         for idx, row in df.iterrows():
-            # Combine Date and Timestamp for the date/time fields
+            # Extract data
             alert_date = str(row.get('Date', ''))
             timestamp = str(row.get('Timestamp', ''))
+            location = str(row.get('Location', ''))
+            severity = str(row.get('Value', ''))
+            message = str(row.get('Status', ''))
+            
+            # Try to determine sensor_type_id (sys_id) from Excel data
+            sensor_type_sys_id = ''
+            
+            # Method 1: Check if there's a 'Sensor' or 'Sensor Type' column in Excel
+            sensor_indicator = None
+            for col in ['Sensor', 'SensorType', 'Sensor_Type', 'Type', 'sensor_type']:
+                if col in df.columns:
+                    sensor_indicator = str(row.get(col, '')).strip()
+                    break
+            
+            # Method 2: If no sensor column, try to infer from message/status
+            if not sensor_indicator or sensor_indicator in ['nan', 'NaN', '']:
+                # Analyze the message/status/location to determine sensor
+                combined_text = f"{message} {location} {severity}".lower()
+                
+                if any(word in combined_text for word in ['pir', 'motion', 'movement', 'detected']):
+                    sensor_indicator = 'PIR'
+                elif any(word in combined_text for word in ['proximity', 'distance', 'close', 'near', 'enter', 'exit']):
+                    sensor_indicator = 'Proximity'
+                elif any(word in combined_text for word in ['humidity', 'humid', 'moisture']):
+                    sensor_indicator = 'Humidity'
+            
+            # Map sensor indicator to sys_id
+            if sensor_indicator:
+                sensor_indicator_clean = sensor_indicator.lower().strip()
+                
+                if sensor_indicator_clean in ['pir', 'motion']:
+                    sensor_type_sys_id = pir_sys_id
+                    print(f"  Alert row {idx + 2}: Using PIR sensor (sys_id: {sensor_type_sys_id})")
+                elif sensor_indicator_clean in ['proximity', 'distance']:
+                    sensor_type_sys_id = proximity_sys_id
+                    print(f"  Alert row {idx + 2}: Using Proximity sensor (sys_id: {sensor_type_sys_id})")
+                elif sensor_indicator_clean in ['humidity', 'humid']:
+                    sensor_type_sys_id = humidity_sys_id
+                    print(f"  Alert row {idx + 2}: Using Humidity sensor (sys_id: {sensor_type_sys_id})")
+            
+            # If still no match, skip this record
+            if not sensor_type_sys_id:
+                print(f"  ⚠ Row {idx + 2}: Could not determine sensor type, skipping alert")
+                continue
             
             # Map the data
             record = {
-                'sensor_type_id': sensor_type_id,
+                'sensor_type_id': sensor_type_sys_id,  # Use sys_id for reference field
                 'alert_date': alert_date,
                 'alert_time': timestamp,
-                'location': str(row.get('Location', '')),
-                'severity': str(row.get('Value', '')),
-                'message': str(row.get('Status', '')),
+                'location': location,
+                'severity': severity,
+                'message': message,
             }
             
             # Filter out empty values
@@ -439,6 +500,8 @@ class ServiceNowSync:
         
         existing = self.get_existing_records(table)
         
+        print(f"\nDuplicate Check: Comparing {len(records)} new records against {len(existing)} existing records")
+        
         created = 0
         skipped = 0
         failed = 0
@@ -470,19 +533,27 @@ class ServiceNowSync:
                 failed += 1
                 continue
             
+            # Debug: Print what we're checking
+            print(f"\n  Checking: {identifier[:80]}...")
+            
             if identifier in existing:
                 # Skip - already exists
-                print(f"  ⏭ Skipping duplicate: {date} {time_val} - {location} - {sensor_id}")
+                print(f"  ⏭ DUPLICATE FOUND - Skipping: {date} {time_val} - {location} - {sensor_id}")
                 skipped += 1
             else:
                 # Create new record
+                print(f"  ✓ NEW RECORD - Creating: {date} {time_val} - {location} - {sensor_id}")
                 if self.create_record(table, record):
                     created += 1
                 else:
                     failed += 1
         
-        if skipped > 0:
-            print(f"⏭ Skipped {skipped} existing record(s)")
+        print(f"\n{'=' * 80}")
+        print(f"DUPLICATE CHECK RESULTS:")
+        print(f"  ✓ Created:  {created}")
+        print(f"  ⏭ Skipped:  {skipped} (duplicates)")
+        print(f"  ✗ Failed:   {failed}")
+        print(f"{'=' * 80}")
         
         return created, skipped, failed
 
