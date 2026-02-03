@@ -1,9 +1,47 @@
+#!/usr/bin/env python3
+"""
+Script to process Excel data and push to ServiceNow
+Requirements:
+- ALERTS sheet: Push ALL data, but only NEW records (no duplicates on re-runs)
+- Other sheets: Only push FIRST ROW where Hour = 12 and FIRST ROW where Hour = 20
+
+Excel columns (actual structure):
+- Date (Column A)
+- Timestamp (Column B) 
+- Hour (Column C) - Contains hour value like 12, 18, 20
+- Location (Column D)
+- Value (Column E)
+- Status (Column F)
+
+ServiceNow tables:
+- x_1855398_elderl_0_iot_alert_event - For ALERTS sheet
+- x_1855398_elderl_0_iot_sensor_record - For sensor sheets
+- x_1855398_elderl_0_sensor_type - For sensor type mapping
+"""
 import os
 import sys
 import pandas as pd
 import requests
 from datetime import datetime
 from typing import Dict, List
+
+# Load environment variables from .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("✓ Loaded environment variables from .env file")
+except ImportError:
+    print("⚠ python-dotenv not installed. Using system environment variables only.")
+    print("  Install with: pip install python-dotenv")
+
+# Load environment variables from .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("✓ Loaded environment variables from .env file")
+except ImportError:
+    print("⚠ python-dotenv not installed. Using system environment variables only.")
+    print("  Install with: pip install python-dotenv")
 
 class ServiceNowSync:
     def __init__(self):
@@ -194,8 +232,8 @@ class ServiceNowSync:
         """
         records = []
         
-        # For alerts, we'll use SENSOR 1 or try to match if possible
-        sensor_type_id = 'SENSOR 1'
+        # For alerts, use ALERT MONITOR SENSOR 1,3,4
+        sensor_type_id = 'ALERT MONITOR SENSOR 1,3,4'
         
         for idx, row in df.iterrows():
             # Combine Date and Timestamp for the date/time fields
@@ -485,7 +523,12 @@ def main():
         sync.sensor_types = sync.get_sensor_types()
         
         # Read all sheets from Excel
-        excel_file = "SeniorConnect_MasterLog.xlsx"
+        # Get excel file from command line argument or use default
+        if len(sys.argv) > 1:
+            excel_file = sys.argv[1]
+        else:
+            excel_file = "SeniorConnect_MasterLog.xlsx"
+        
         all_sheets = sync.read_all_sheets(excel_file)
         
         if not all_sheets:
