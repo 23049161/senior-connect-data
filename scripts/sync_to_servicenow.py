@@ -226,25 +226,49 @@ class ServiceNowSync:
         # Look for sensor with type_name containing multiple types or sensor_type_id containing "ALERT MONITOR"
         alert_monitor_sys_id = ''
         
+        print(f"Searching for ALERT MONITOR SENSOR among {len(self.sensor_types)} sensors...")
+        
         for type_name, sensor_info in self.sensor_types.items():
             sensor_type_id = sensor_info.get('sensor_type_id', '')
-            type_name_lower = type_name.lower()
-            sensor_type_id_lower = sensor_type_id.lower()
+            type_name_str = str(type_name)
+            sensor_type_id_str = str(sensor_type_id)
             
-            # Check if this is the alert monitor sensor
-            # It should have type_name like "PIR, Humidity, Proximity" or sensor_type_id like "ALERT MONITOR SENSOR 1,3,4"
-            if ('alert' in sensor_type_id_lower and 'monitor' in sensor_type_id_lower) or \
-               ('pir' in type_name_lower and 'humidity' in type_name_lower and 'proximity' in type_name_lower):
+            type_name_lower = type_name_str.lower()
+            sensor_type_id_lower = sensor_type_id_str.lower()
+            
+            print(f"  Checking: {sensor_type_id} | type_name: {type_name}")
+            
+            # Check if this is the alert monitor sensor - multiple ways to identify it:
+            # 1. sensor_type_id contains "ALERT MONITOR"
+            if 'alert' in sensor_type_id_lower and 'monitor' in sensor_type_id_lower:
                 alert_monitor_sys_id = sensor_info['sys_id']
-                print(f"Found ALERT MONITOR SENSOR: {sensor_type_id} ({type_name}) - sys_id: {alert_monitor_sys_id}")
+                print(f"✓ Found ALERT MONITOR SENSOR (by sensor_type_id): {sensor_type_id} - sys_id: {alert_monitor_sys_id}")
+                break
+            
+            # 2. type_name contains multiple sensor types (PIR, Humidity, Proximity)
+            if 'pir' in type_name_lower and 'humidity' in type_name_lower and 'proximity' in type_name_lower:
+                alert_monitor_sys_id = sensor_info['sys_id']
+                print(f"✓ Found ALERT MONITOR SENSOR (by type_name): {sensor_type_id} ({type_name}) - sys_id: {alert_monitor_sys_id}")
+                break
+            
+            # 3. type_name contains commas (indicating multiple types)
+            if ',' in type_name_str and any(word in type_name_lower for word in ['pir', 'humidity', 'proximity']):
+                alert_monitor_sys_id = sensor_info['sys_id']
+                print(f"✓ Found ALERT MONITOR SENSOR (by comma-separated types): {sensor_type_id} ({type_name}) - sys_id: {alert_monitor_sys_id}")
                 break
         
         if not alert_monitor_sys_id:
             print(f"⚠ WARNING: Could not find ALERT MONITOR SENSOR in sensor_type table!")
             print(f"⚠ Available sensors:")
             for type_name, sensor_info in self.sensor_types.items():
-                print(f"  - {sensor_info['sensor_type_id']} ({type_name})")
-            print(f"⚠ Alerts will be skipped unless ALERT MONITOR SENSOR is found")
+                print(f"  - sensor_type_id: {sensor_info['sensor_type_id']}")
+                print(f"    type_name: {type_name}")
+                print(f"    sys_id: {sensor_info['sys_id']}")
+                print()
+            print(f"⚠ Please create a sensor in ServiceNow with:")
+            print(f"   - sensor_type_id containing 'ALERT MONITOR'")
+            print(f"   - OR type_name like 'PIR, Humidity, Proximity'")
+            print(f"⚠ Alerts will be skipped")
             return []
         
         # Process all alert rows using the ALERT MONITOR SENSOR
