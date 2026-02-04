@@ -207,8 +207,8 @@ class ServiceNowSync:
         Transform ALERTS sheet data for iot_alert_event table
         Pushes ALL data from the sheet
         
-        For alerts, determine which sensor triggered it (PIR, Proximity, or Humidity)
-        and use the sys_id from the sensor_type table
+        For alerts, ALL alerts should use the ALERT MONITOR SENSOR (which handles PIR, Humidity, Proximity)
+        Find the sensor with type_name containing "PIR, Humidity, Proximity" or sensor_type_id like "ALERT MONITOR"
         
         ServiceNow fields:
         - sensor_type_id (reference to sensor_type table - uses sys_id)
@@ -222,16 +222,32 @@ class ServiceNowSync:
         
         print(f"Alert sheet columns: {list(df.columns)}")
         
-        # Get sys_ids for alert sensors (PIR, Proximity, Humidity)
-        pir_sys_id = self.sensor_types.get('PIR', {}).get('sys_id', '')
-        proximity_sys_id = self.sensor_types.get('Proximity', {}).get('sys_id', '')
-        humidity_sys_id = self.sensor_types.get('Humidity', {}).get('sys_id', '')
+        # Find the ALERT MONITOR SENSOR sys_id
+        # Look for sensor with type_name containing multiple types or sensor_type_id containing "ALERT MONITOR"
+        alert_monitor_sys_id = ''
         
-        print(f"Alert sensor mappings:")
-        print(f"  PIR: {pir_sys_id}")
-        print(f"  Proximity: {proximity_sys_id}")
-        print(f"  Humidity: {humidity_sys_id}")
+        for type_name, sensor_info in self.sensor_types.items():
+            sensor_type_id = sensor_info.get('sensor_type_id', '')
+            type_name_lower = type_name.lower()
+            sensor_type_id_lower = sensor_type_id.lower()
+            
+            # Check if this is the alert monitor sensor
+            # It should have type_name like "PIR, Humidity, Proximity" or sensor_type_id like "ALERT MONITOR SENSOR 1,3,4"
+            if ('alert' in sensor_type_id_lower and 'monitor' in sensor_type_id_lower) or \
+               ('pir' in type_name_lower and 'humidity' in type_name_lower and 'proximity' in type_name_lower):
+                alert_monitor_sys_id = sensor_info['sys_id']
+                print(f"Found ALERT MONITOR SENSOR: {sensor_type_id} ({type_name}) - sys_id: {alert_monitor_sys_id}")
+                break
         
+        if not alert_monitor_sys_id:
+            print(f"⚠ WARNING: Could not find ALERT MONITOR SENSOR in sensor_type table!")
+            print(f"⚠ Available sensors:")
+            for type_name, sensor_info in self.sensor_types.items():
+                print(f"  - {sensor_info['sensor_type_id']} ({type_name})")
+            print(f"⚠ Alerts will be skipped unless ALERT MONITOR SENSOR is found")
+            return []
+        
+        # Process all alert rows using the ALERT MONITOR SENSOR
         for idx, row in df.iterrows():
             # Extract data
             alert_date = str(row.get('Date', ''))
@@ -240,50 +256,12 @@ class ServiceNowSync:
             severity = str(row.get('Value', ''))
             message = str(row.get('Status', ''))
             
-            # Try to determine sensor_type_id (sys_id) from Excel data
-            sensor_type_sys_id = ''
-            
-            # Method 1: Check if there's a 'Sensor' or 'Sensor Type' column in Excel
-            sensor_indicator = None
-            for col in ['Sensor', 'SensorType', 'Sensor_Type', 'Type', 'sensor_type']:
-                if col in df.columns:
-                    sensor_indicator = str(row.get(col, '')).strip()
-                    break
-            
-            # Method 2: If no sensor column, try to infer from message/status
-            if not sensor_indicator or sensor_indicator in ['nan', 'NaN', '']:
-                # Analyze the message/status/location to determine sensor
-                combined_text = f"{message} {location} {severity}".lower()
-                
-                if any(word in combined_text for word in ['pir', 'motion', 'movement', 'detected']):
-                    sensor_indicator = 'PIR'
-                elif any(word in combined_text for word in ['proximity', 'distance', 'close', 'near', 'enter', 'exit']):
-                    sensor_indicator = 'Proximity'
-                elif any(word in combined_text for word in ['humidity', 'humid', 'moisture']):
-                    sensor_indicator = 'Humidity'
-            
-            # Map sensor indicator to sys_id
-            if sensor_indicator:
-                sensor_indicator_clean = sensor_indicator.lower().strip()
-                
-                if sensor_indicator_clean in ['pir', 'motion']:
-                    sensor_type_sys_id = pir_sys_id
-                    print(f"  Alert row {idx + 2}: Using PIR sensor (sys_id: {sensor_type_sys_id})")
-                elif sensor_indicator_clean in ['proximity', 'distance']:
-                    sensor_type_sys_id = proximity_sys_id
-                    print(f"  Alert row {idx + 2}: Using Proximity sensor (sys_id: {sensor_type_sys_id})")
-                elif sensor_indicator_clean in ['humidity', 'humid']:
-                    sensor_type_sys_id = humidity_sys_id
-                    print(f"  Alert row {idx + 2}: Using Humidity sensor (sys_id: {sensor_type_sys_id})")
-            
-            # If still no match, skip this record
-            if not sensor_type_sys_id:
-                print(f"  ⚠ Row {idx + 2}: Could not determine sensor type, skipping alert")
-                continue
+            # ALL alerts use the ALERT MONITOR SENSOR
+            sensor_type_sys_id = alert_monitor_sys_id
             
             # Map the data
             record = {
-                'sensor_type_id': sensor_type_sys_id,  # Use sys_id for reference field
+                'sensor_type_id': sensor_type_sys_id,  # Use ALERT MONITOR SENSOR sys_id
                 'alert_date': alert_date,
                 'alert_time': timestamp,
                 'location': location,
@@ -297,7 +275,7 @@ class ServiceNowSync:
             if record and len(record) > 2:
                 records.append(record)
         
-        print(f"Transformed {len(records)} alert records from sheet '{sheet_name}'")
+        print(f"Transformed {len(records)} alert records from sheet '{sheet_name}' using ALERT MONITOR SENSOR")
         return records
     
     def transform_sensor_data(self, df: pd.DataFrame, sheet_name: str) -> List[Dict]:
@@ -561,7 +539,7 @@ def main():
     print("=" * 80)
     print("Starting ServiceNow Sync Process")
     print("Configuration:")
-    print("  - ALERTS sheet: Push ALL data (only NEW records)")
+    print("  - ALERTS sheet: Push ALL data using ALERT MONITOR SENSOR (only NEW records)")
     print("  - Other sheets: Push FIRST row with time at 12pm and FIRST row with time at 8pm")
     print("  - Using sensor_type table to match sensors with Excel sheets")
     print("=" * 80)
